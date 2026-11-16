@@ -1,0 +1,14 @@
+# Gradle and Kotlin build output
+.gradle/
+**/build/
+.kotlin/
+out/
+
+# IntelliJ IDEA local configuration
+.idea/
+*.iml
+
+# Machine-specific configuration
+local.properties
+.DS_Store
+Thumbs.db
