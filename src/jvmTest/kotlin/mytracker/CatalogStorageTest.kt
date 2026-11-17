@@ -1,12 +1,14 @@
 package mytracker
 
+import java.io.DataOutputStream
+import java.io.DataInputStream
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import java.io.DataOutputStream
-import java.nio.file.Files
-import mytracker.domain.MediaEntry
+import kotlin.test.assertTrue
 import mytracker.domain.ExternalMediaReference
+import mytracker.domain.MediaEntry
 import mytracker.domain.SeasonProgress
 import mytracker.domain.ViewingNote
 import mytracker.domain.WatchStatus
@@ -18,35 +20,36 @@ class CatalogStorageTest {
     }
 
     @Test
-    fun saveAndLoadPreserveEveryEntryFieldAndNestedValue() = withStorage { storage, _ ->
+    fun saveAndLoadPreserveTheUnifiedCatalogFormat() = withStorage { storage, _ ->
         val entries = listOf(
             MediaEntry(
-                id = "entry-1",
+                id = "series",
                 title = "Атака титанов",
-                categoryId = "Аниме",
+                categoryId = "Аниме-сериал",
                 externalReference = ExternalMediaReference("tmdb", "1429", "tv"),
+                posterUrl = "https://image.tmdb.org/t/p/w342/poster.jpg",
+                releaseYear = 2013,
+                productionCountries = listOf("Япония"),
                 status = WatchStatus.WATCHED,
                 rating = 5,
-                notes = "Финал понравился",
-                viewingNotes = listOf(
-                    ViewingNote(date = "2026-11-17", text = "Пересмотреть финал"),
-                    ViewingNote(date = "2026-11-18", text = "Короткая заметка"),
-                ),
+                notes = "Рецензия на весь сериал",
+                viewingNotes = listOf(ViewingNote("2026-11-17", "Пересмотреть финал")),
                 seasons = listOf(
                     SeasonProgress(
-                        seasonNumber = 4,
-                        viewingNotes = listOf(
-                            ViewingNote(date = "2026-11-19", text = "Последний сезон"),
-                        ),
+                        seasonNumber = 1,
+                        name = "Первый сезон",
+                        episodeCount = 25,
+                        firstAirDate = "2013-04-07",
+                        rating = 4,
+                        notes = "Рецензия на сезон",
                     ),
-                    SeasonProgress(seasonNumber = 1),
+                    SeasonProgress(seasonNumber = 2),
                 ),
             ),
             MediaEntry(
-                id = "entry-2",
-                title = "A very long note",
+                id = "movie",
+                title = "Фильм",
                 categoryId = "Фильм",
-                notes = "заметка ".repeat(12_000),
             ),
         )
 
@@ -68,16 +71,88 @@ class CatalogStorageTest {
     }
 
     @Test
-    fun loadRejectsUnsupportedFileVersion() = withStorage { storage, path ->
-        Files.createDirectories(path.parent)
-        DataOutputStream(Files.newOutputStream(path)).use { it.writeInt(999) }
+    fun loadRejectsCatalogsOutsideTheSingleSupportedFormat() = withStorage { storage, path ->
+        listOf(1, 2, 3, 4, 5, 6, 9, 999).forEach { version ->
+            DataOutputStream(Files.newOutputStream(path)).use { output ->
+                output.writeInt(version)
+                output.writeInt(0)
+            }
+            val originalBytes = Files.readAllBytes(path)
 
-        assertFailsWith<IllegalStateException> { storage.load() }
+            val error = assertFailsWith<IllegalStateException> { storage.load() }
+
+            assertTrue(error.message.orEmpty().contains("expected 8"))
+            assertEquals(originalBytes.toList(), Files.readAllBytes(path).toList())
+        }
+    }
+
+    @Test
+    fun loadMigratesVersionSevenCatalogAndRewritesItAsVersionEight() = withStorage { storage, path ->
+        DataOutputStream(Files.newOutputStream(path)).use { output ->
+            output.writeInt(7)
+            output.writeInt(1)
+            output.writeFixtureString("legacy-v7")
+            output.writeFixtureString("Аниме-сериал")
+            output.writeFixtureString("Аниме-сериал")
+            output.writeBoolean(true)
+            output.writeFixtureString("tmdb")
+            output.writeFixtureString("123")
+            output.writeFixtureString("tv")
+            output.writeBoolean(true)
+            output.writeFixtureString("https://image.tmdb.org/t/p/w342/poster.jpg")
+            output.writeBoolean(true)
+            output.writeInt(2024)
+            output.writeInt(1)
+            output.writeFixtureString("Япония")
+            output.writeFixtureString(WatchStatus.WANT_TO_WATCH.name)
+            output.writeBoolean(false)
+            output.writeFixtureString("")
+            output.writeInt(1)
+            output.writeFixtureString("2026-11-17")
+            output.writeFixtureString("Запись каталога сохранена")
+            output.writeInt(1)
+            output.writeInt(1)
+            output.writeBoolean(true)
+            output.writeFixtureString("Первый сезон")
+            output.writeBoolean(true)
+            output.writeInt(12)
+            output.writeBoolean(true)
+            output.writeFixtureString("2024-01-15")
+            output.writeInt(1)
+            output.writeFixtureString("2024-02-01")
+            output.writeFixtureString("Старая заметка к сезону")
+        }
+
+        val loaded = storage.load()
+
+        assertEquals(
+            MediaEntry(
+                id = "legacy-v7",
+                title = "Аниме-сериал",
+                categoryId = "Аниме-сериал",
+                externalReference = ExternalMediaReference("tmdb", "123", "tv"),
+                posterUrl = "https://image.tmdb.org/t/p/w342/poster.jpg",
+                releaseYear = 2024,
+                productionCountries = listOf("Япония"),
+                status = WatchStatus.WANT_TO_WATCH,
+                viewingNotes = listOf(ViewingNote("2026-11-17", "Запись каталога сохранена")),
+                seasons = listOf(
+                    SeasonProgress(
+                        seasonNumber = 1,
+                        name = "Первый сезон",
+                        episodeCount = 12,
+                        firstAirDate = "2024-01-15",
+                    ),
+                ),
+            ),
+            loaded.single(),
+        )
+        assertEquals(8, DataInputStream(Files.newInputStream(path)).use { it.readInt() })
     }
 
     @Test
     fun loadFailureLeavesOriginalFileUntouched() = withStorage { storage, path ->
-        val originalBytes = byteArrayOf(0, 0, 0, 4, 0, 0, 0, 1, 1)
+        val originalBytes = byteArrayOf(0, 0, 0, 8, 0, 0, 0, 1, 1)
         Files.write(path, originalBytes)
 
         assertFailsWith<java.io.EOFException> { storage.load() }
@@ -96,109 +171,6 @@ class CatalogStorageTest {
 
         assertEquals(originalBytes.toList(), Files.readAllBytes(path).toList())
         assertEquals(false, Files.exists(path.resolveSibling("${path.fileName}.tmp")))
-    }
-
-    @Test
-    fun loadMigratesLegacyViewingNoteRatings() = withStorage { storage, path ->
-        DataOutputStream(Files.newOutputStream(path)).use { output ->
-            output.writeInt(1)
-            output.writeInt(1)
-            output.writeFixtureString("legacy")
-            output.writeFixtureString("Старое произведение")
-            output.writeFixtureString("Фильм")
-            output.writeFixtureString(WatchStatus.WATCHED.name)
-            output.writeBoolean(false) // No entry rating.
-            output.writeFixtureString("")
-            output.writeInt(1) // One viewing note.
-            output.writeFixtureString("2026-11-17")
-            output.writeFixtureString("Старая заметка")
-            output.writeBoolean(true) // Legacy note rating, discarded during migration.
-            output.writeInt(5)
-            output.writeInt(0) // No seasons.
-        }
-
-        val migrated = listOf(
-            MediaEntry(
-                id = "legacy",
-                title = "Старое произведение",
-                categoryId = "Фильм",
-                status = WatchStatus.WATCHED,
-                viewingNotes = listOf(ViewingNote("2026-11-17", "Старая заметка")),
-            ),
-        )
-        assertEquals(migrated, storage.load())
-
-        storage.save(migrated)
-        assertEquals(migrated, storage.load())
-    }
-
-    @Test
-    fun loadMigratesLegacySeasonRatings() = withStorage { storage, path ->
-        DataOutputStream(Files.newOutputStream(path)).use { output ->
-            output.writeInt(2)
-            output.writeInt(1)
-            output.writeFixtureString("legacy-season")
-            output.writeFixtureString("Сериал")
-            output.writeFixtureString("Сериал")
-            output.writeFixtureString(WatchStatus.WATCHED.name)
-            output.writeBoolean(false) // No entry rating.
-            output.writeFixtureString("")
-            output.writeInt(0) // No entry notes.
-            output.writeInt(1) // One season.
-            output.writeInt(2)
-            output.writeBoolean(true) // Legacy season rating, discarded during migration.
-            output.writeInt(4)
-            output.writeInt(0) // No season notes.
-        }
-
-        val migrated = listOf(
-            MediaEntry(
-                id = "legacy-season",
-                title = "Сериал",
-                categoryId = "Сериал",
-                status = WatchStatus.WATCHED,
-                seasons = listOf(SeasonProgress(seasonNumber = 2)),
-            ),
-        )
-        assertEquals(migrated, storage.load())
-
-        storage.save(migrated)
-        assertEquals(migrated, storage.load())
-    }
-
-    @Test
-    fun loadMigratesVersionThreeCatalogAndPreservesSeasonNotes() = withStorage { storage, path ->
-        DataOutputStream(Files.newOutputStream(path)).use { output ->
-            output.writeInt(3)
-            output.writeInt(1)
-            output.writeFixtureString("legacy-v3")
-            output.writeFixtureString("Сериал третьей версии")
-            output.writeFixtureString("Сериал")
-            output.writeFixtureString(WatchStatus.WANT_TO_WATCH.name)
-            output.writeBoolean(false)
-            output.writeFixtureString("")
-            output.writeInt(0) // No entry notes.
-            output.writeInt(1) // One season without a rating field in v3.
-            output.writeInt(2)
-            output.writeInt(1) // One season note.
-            output.writeFixtureString("2026-11-17")
-            output.writeFixtureString("Заметка сезона")
-        }
-
-        val expected = listOf(
-            MediaEntry(
-                id = "legacy-v3",
-                title = "Сериал третьей версии",
-                categoryId = "Сериал",
-                seasons = listOf(
-                    SeasonProgress(
-                        seasonNumber = 2,
-                        viewingNotes = listOf(ViewingNote("2026-11-17", "Заметка сезона")),
-                    ),
-                ),
-            ),
-        )
-        assertEquals(expected, storage.load())
     }
 
     private fun withStorage(block: (CatalogStorage, java.nio.file.Path) -> Unit) {

@@ -22,10 +22,8 @@ internal class CatalogStorage(
     ),
 ) {
     private companion object {
-        const val FILE_VERSION = 4
-        const val FIRST_FILE_VERSION = 1
-        const val VERSION_WITH_NOTE_RATINGS = 1
-        const val VERSION_WITHOUT_SEASON_RATINGS = 3
+        const val FILE_VERSION = 8
+        const val LEGACY_FILE_VERSION = 7
         const val MAX_ITEMS = 100_000
         const val MAX_STRING_BYTES = 10 * 1024 * 1024
     }
@@ -33,16 +31,18 @@ internal class CatalogStorage(
     fun load(): List<MediaEntry> {
         if (Files.notExists(filePath)) return emptyList()
 
-        DataInputStream(Files.newInputStream(filePath).buffered()).use { input ->
+        val (version, entries) = DataInputStream(Files.newInputStream(filePath).buffered()).use { input ->
             val version = input.readInt()
-            check(version in FIRST_FILE_VERSION..FILE_VERSION) { "Unsupported catalog file version" }
+            check(version == FILE_VERSION || version == LEGACY_FILE_VERSION) {
+                "Unsupported catalog file version $version; expected $FILE_VERSION"
+            }
             val count = input.readCount()
-            return List(count) {
+            val entries = List(count) {
                 MediaEntry(
                     id = input.readString(),
                     title = input.readString(),
                     categoryId = input.readString(),
-                    externalReference = if (version >= 4 && input.readBoolean()) {
+                    externalReference = if (input.readBoolean()) {
                         ExternalMediaReference(
                             provider = input.readString(),
                             id = input.readString(),
@@ -51,21 +51,33 @@ internal class CatalogStorage(
                     } else {
                         null
                     },
+                    posterUrl = input.readNullableString(),
+                    releaseYear = input.readNullableInt(),
+                    productionCountries = List(input.readCount()) { input.readString() },
                     status = WatchStatus.valueOf(input.readString()),
                     rating = input.readNullableInt(),
                     notes = input.readString(),
-                    viewingNotes = List(input.readCount()) { input.readViewingNote(version) },
+                    viewingNotes = List(input.readCount()) { input.readViewingNote() },
                     seasons = List(input.readCount()) {
                         val seasonNumber = input.readInt()
-                        if (version < VERSION_WITHOUT_SEASON_RATINGS) input.readNullableInt()
                         SeasonProgress(
                             seasonNumber = seasonNumber,
-                            viewingNotes = List(input.readCount()) { input.readViewingNote(version) },
+                            name = input.readNullableString(),
+                            episodeCount = input.readNullableInt(),
+                            firstAirDate = input.readNullableString(),
+                            rating = if (version == FILE_VERSION) input.readNullableInt() else null,
+                            notes = if (version == FILE_VERSION) input.readString() else {
+                                List(input.readCount()) { input.readViewingNote() }
+                                ""
+                            },
                         )
                     },
                 )
             }
+            version to entries
         }
+        if (version == LEGACY_FILE_VERSION) save(entries)
+        return entries
     }
 
     fun save(entries: List<MediaEntry>) {
@@ -86,6 +98,10 @@ internal class CatalogStorage(
                         output.writeString(reference.id)
                         output.writeString(reference.mediaType)
                     }
+                    output.writeNullableString(entry.posterUrl)
+                    output.writeNullableInt(entry.releaseYear)
+                    output.writeCount(entry.productionCountries.size)
+                    entry.productionCountries.forEach { country -> output.writeString(country) }
                     output.writeString(entry.status.name)
                     output.writeNullableInt(entry.rating)
                     output.writeString(entry.notes)
@@ -94,8 +110,11 @@ internal class CatalogStorage(
                     output.writeCount(entry.seasons.size)
                     entry.seasons.forEach { season ->
                         output.writeInt(season.seasonNumber)
-                        output.writeCount(season.viewingNotes.size)
-                        season.viewingNotes.forEach { note -> output.writeViewingNote(note) }
+                        output.writeNullableString(season.name)
+                        output.writeNullableInt(season.episodeCount)
+                        output.writeNullableString(season.firstAirDate)
+                        output.writeNullableInt(season.rating)
+                        output.writeString(season.notes)
                     }
                 }
             }
@@ -149,15 +168,21 @@ internal class CatalogStorage(
 
     private fun DataInputStream.readNullableInt(): Int? = if (readBoolean()) readInt() else null
 
+    private fun DataInputStream.readNullableString(): String? = if (readBoolean()) readString() else null
+
     private fun DataOutputStream.writeNullableInt(value: Int?) {
         writeBoolean(value != null)
         if (value != null) writeInt(value)
     }
 
-    private fun DataInputStream.readViewingNote(version: Int): ViewingNote {
+    private fun DataOutputStream.writeNullableString(value: String?) {
+        writeBoolean(value != null)
+        if (value != null) writeString(value)
+    }
+
+    private fun DataInputStream.readViewingNote(): ViewingNote {
         val date = readString()
         val text = readString()
-        if (version == VERSION_WITH_NOTE_RATINGS) readNullableInt()
         return ViewingNote(date = date, text = text)
     }
 

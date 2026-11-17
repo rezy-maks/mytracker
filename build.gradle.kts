@@ -21,14 +21,18 @@ kotlin {
             implementation(compose.material3)
             implementation(compose.ui)
             implementation(compose.components.resources)
+            implementation("io.coil-kt.coil3:coil-compose:3.6.3")
         }
         jvmMain.dependencies {
             implementation(compose.desktop.currentOs)
             implementation("net.java.dev.jna:jna-platform:5.17.0")
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+            implementation("io.coil-kt.coil3:coil-network-okhttp:3.6.3")
         }
         jvmTest.dependencies {
             implementation(kotlin("test"))
+            implementation("org.jetbrains.compose.ui:ui-test-junit4:1.12.2")
+            implementation(compose.desktop.currentOs)
         }
     }
 }
@@ -43,4 +47,3 @@ compose.desktop {
         jvmArgs += "--enable-native-access=ALL-UNNAMED"
     }
 }
-

@@ -9,6 +9,10 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import mytracker.domain.ExternalMediaReference
+import mytracker.domain.MediaClassifier
+import mytracker.domain.MediaCategories
+import mytracker.domain.MediaMetadata
+import mytracker.domain.MediaSeasonMetadata
 import mytracker.domain.MediaSearchResult
 import mytracker.domain.MediaSearchRateLimitException
 import java.io.IOException
@@ -35,24 +39,82 @@ internal class TmdbClient(
     suspend fun searchFallbacks(query: String, category: String): List<MediaSearchResult> =
         search(query, category, useFallbacks = true)
 
-    suspend fun loadProductionCountries(result: MediaSearchResult): List<String> = withContext(Dispatchers.IO) {
+    suspend fun loadMediaMetadata(result: MediaSearchResult): MediaMetadata = withContext(Dispatchers.IO) {
         val token = accessToken?.takeIf(String::isNotBlank)
             ?: throw IllegalStateException("TMDB_API_READ_ACCESS_TOKEN is not configured.")
         val mediaType = result.reference.mediaType
         require(mediaType == "movie" || mediaType == "tv") { "Unsupported TMDB media type: $mediaType" }
         val response = request(
-            "https://api.themoviedb.org/3/$mediaType/${result.reference.id}?language=ru-RU",
+            "https://api.themoviedb.org/3/$mediaType/${result.reference.id}" +
+                "?language=ru-RU&append_to_response=keywords",
             token,
         )
-        parseProductionCountries(response)
+        parseMediaMetadata(response, mediaType)
     }
 
     internal fun parseProductionCountries(body: String): List<String> {
-        val details = try {
-            Json.parseToJsonElement(body).jsonObject
-        } catch (exception: Exception) {
-            throw IOException("TMDB returned details in an unexpected format.", exception)
+        val details = parseDetails(body)
+        return productionCountries(details)
+    }
+
+    internal fun parseMediaMetadata(body: String, mediaType: String): MediaMetadata {
+        require(mediaType == "movie" || mediaType == "tv") { "Unsupported TMDB media type: $mediaType" }
+        val details = parseDetails(body)
+        val countryCodes = buildSet {
+            details["production_countries"]?.jsonArray.orEmpty().forEach { element ->
+                (element as? JsonObject)?.get("iso_3166_1")?.jsonPrimitive?.contentOrNull
+                    ?.let(::add)
+            }
+            details["origin_country"]?.jsonArray.orEmpty().forEach { element ->
+                element.jsonPrimitive.contentOrNull?.let(::add)
+            }
         }
+        val genreIds = details["genres"]?.jsonArray.orEmpty().mapNotNull { element ->
+            (element as? JsonObject)?.get("id")?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+        }.toSet()
+        val keywordsContainer = details["keywords"] as? JsonObject
+        val keywordList = (keywordsContainer?.get("keywords") ?: keywordsContainer?.get("results"))
+            ?.jsonArray.orEmpty()
+        val keywords = keywordList.mapNotNull { element ->
+            (element as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+        }.toSet()
+
+        return MediaMetadata(
+            productionCountries = productionCountries(details),
+            categorySuggestion = MediaClassifier.suggest(
+                mediaType = mediaType,
+                genreIds = genreIds,
+                originalLanguage = details["original_language"]?.jsonPrimitive?.contentOrNull,
+                countryCodes = countryCodes,
+                keywords = keywords,
+            ),
+            seasons = if (mediaType == "tv") {
+                details["seasons"]?.jsonArray.orEmpty().mapNotNull { element ->
+                    val season = element as? JsonObject ?: return@mapNotNull null
+                    val seasonNumber = season["season_number"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+                        ?.takeIf { it >= 0 } ?: return@mapNotNull null
+                    MediaSeasonMetadata(
+                        seasonNumber = seasonNumber,
+                        name = season["name"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank),
+                        episodeCount = season["episode_count"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+                            ?.takeIf { it >= 0 },
+                        firstAirDate = season["air_date"]?.jsonPrimitive?.contentOrNull
+                            ?.takeIf(String::isNotBlank),
+                    )
+                }.distinctBy { it.seasonNumber }.sortedBy { it.seasonNumber }
+            } else {
+                emptyList()
+            },
+        )
+    }
+
+    private fun parseDetails(body: String): JsonObject = try {
+        Json.parseToJsonElement(body).jsonObject
+    } catch (exception: Exception) {
+        throw IOException("TMDB returned details in an unexpected format.", exception)
+    }
+
+    private fun productionCountries(details: JsonObject): List<String> {
         val productionCountries = details["production_countries"]?.jsonArray.orEmpty()
             .mapNotNull { element ->
                 (element as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
@@ -78,11 +140,7 @@ internal class TmdbClient(
                 "Не задан токен TMDB. Установите переменную TMDB_API_READ_ACCESS_TOKEN и перезапустите приложение.",
             )
         val normalizedQuery = query.trim().replace(Regex("\\s+"), " ")
-        val types = when (category) {
-            "Фильм" -> listOf("movie")
-            "Сериал" -> listOf("tv")
-            else -> listOf("movie", "tv")
-        }
+        val types = searchTypes(category)
 
         val resultsPerType = if (types.size > 1) 10 else 20
         types.flatMap { type ->
@@ -95,6 +153,11 @@ internal class TmdbClient(
         }
             .distinctBy { it.reference.id to it.reference.mediaType }
             .take(20)
+    }
+
+    internal fun searchTypes(category: String): List<String> = when (category) {
+        MediaCategories.SERIES, MediaCategories.ANIME_SERIES -> listOf("tv", "movie")
+        else -> listOf("movie", "tv")
     }
 
     private fun searchTypeDirect(type: String, query: String, token: String): List<MediaSearchResult> {
@@ -210,7 +273,7 @@ internal class TmdbClient(
     }
 
     private fun requestSearch(type: String, encodedQuery: String, token: String): String {
-        val url = "https://api.themoviedb.org/3/search/$type?query=$encodedQuery&include_adult=false&language=ru-RU&page=1"
+        val url = "https://api.themoviedb.org/3/search/$type?query=$encodedQuery&include_adult=true&language=ru-RU&page=1"
         return request(url, token)
     }
 
@@ -245,7 +308,7 @@ internal class TmdbClient(
         return response.body()
     }
 
-    private fun parseResults(body: String, type: String): List<MediaSearchResult> {
+    internal fun parseResults(body: String, type: String): List<MediaSearchResult> {
         val results = try {
             Json.parseToJsonElement(body).jsonObject["results"]?.jsonArray.orEmpty()
         } catch (exception: Exception) {
@@ -264,6 +327,9 @@ internal class TmdbClient(
                 title = title,
                 releaseYear = date?.take(4)?.toIntOrNull(),
                 overview = item.string("overview")?.takeIf(String::isNotBlank),
+                posterUrl = item.string("poster_path")
+                    ?.takeIf(String::isNotBlank)
+                    ?.let { "https://image.tmdb.org/t/p/w342$it" },
             )
         }
     }

@@ -59,7 +59,7 @@ fun main() {
                 currentDate = { LocalDate.now().toString() },
                 searchMedia = tmdbClient::searchDirect,
                 searchFallbackMedia = tmdbClient::searchFallbacks,
-                loadMediaCountries = tmdbClient::loadProductionCountries,
+                loadMediaMetadata = tmdbClient::loadMediaMetadata,
             )
         }
     }

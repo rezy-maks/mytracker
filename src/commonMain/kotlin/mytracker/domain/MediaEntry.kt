@@ -21,7 +21,11 @@ data class ViewingNote(
 
 data class SeasonProgress(
     val seasonNumber: Int,
-    val viewingNotes: List<ViewingNote> = emptyList(),
+    val name: String? = null,
+    val episodeCount: Int? = null,
+    val firstAirDate: String? = null,
+    val rating: Int? = null,
+    val notes: String = "",
 )
 
 data class MediaEntry(
@@ -29,6 +33,9 @@ data class MediaEntry(
     val title: String,
     val categoryId: String,
     val externalReference: ExternalMediaReference? = null,
+    val posterUrl: String? = null,
+    val releaseYear: Int? = null,
+    val productionCountries: List<String> = emptyList(),
     val status: WatchStatus = WatchStatus.WANT_TO_WATCH,
     /** A score from 1 to 5 check marks. Null means no score was assigned. */
     val rating: Int? = null,
@@ -37,4 +44,3 @@ data class MediaEntry(
     val viewingNotes: List<ViewingNote> = emptyList(),
     val seasons: List<SeasonProgress> = emptyList(),
 )
-
