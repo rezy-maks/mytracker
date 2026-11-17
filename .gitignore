@@ -10,5 +10,7 @@ out/
 
 # Machine-specific configuration
 local.properties
+# Local launcher contains a machine-specific JDK path.
+gradle-local.ps1
 .DS_Store
 Thumbs.db

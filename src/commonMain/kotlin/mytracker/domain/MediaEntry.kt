@@ -13,19 +13,14 @@ enum class WatchStatus {
     WATCHED,
 }
 
-/**
- * A personal review written after a viewing. The date is stored as ISO-8601
- * text (yyyy-MM-dd) so the shared model does not depend on a platform date API.
- */
+/** A short note about a viewing. The stored date uses ISO-8601 text (yyyy-MM-dd). */
 data class ViewingNote(
     val date: String,
     val text: String,
-    val rating: Int? = null,
 )
 
 data class SeasonProgress(
     val seasonNumber: Int,
-    val rating: Int? = null,
     val viewingNotes: List<ViewingNote> = emptyList(),
 )
 

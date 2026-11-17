@@ -25,6 +25,9 @@ kotlin {
             implementation(compose.desktop.currentOs)
             implementation("net.java.dev.jna:jna-platform:5.17.0")
         }
+        jvmTest.dependencies {
+            implementation(kotlin("test"))
+        }
     }
 }
 
