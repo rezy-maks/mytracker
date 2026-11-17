@@ -14,7 +14,12 @@ private const val DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 
 fun main() {
     val catalogStorage = CatalogStorage()
-    val initialEntries = catalogStorage.load()
+    val loadResult = runCatching { catalogStorage.load() }
+    val initialEntries = loadResult.getOrDefault(emptyList())
+    val initialStorageError = loadResult.exceptionOrNull()?.let { error ->
+        "Не удалось прочитать каталог:\n${error.message ?: error::class.simpleName}\nФайл: ${catalogStorage.filePath}"
+    }
+    val tmdbClient = TmdbClient.fromEnvironment()
     application {
         Window(
             onCloseRequest = ::exitApplication,
@@ -36,8 +41,25 @@ fun main() {
             }
             App(
                 initialEntries = initialEntries,
-                onEntriesChanged = catalogStorage::save,
+                onEntriesChanged = { entries ->
+                    runCatching { catalogStorage.save(entries) }.fold(
+                        onSuccess = { Result.success(Unit) },
+                        onFailure = { error ->
+                            Result.failure(
+                                IllegalStateException(
+                                    "Не удалось сохранить каталог:\n${error.message ?: error::class.simpleName}\n" +
+                                        "Файл: ${catalogStorage.filePath}",
+                                    error,
+                                ),
+                            )
+                        },
+                    )
+                },
+                initialStorageError = initialStorageError,
                 currentDate = { LocalDate.now().toString() },
+                searchMedia = tmdbClient::searchDirect,
+                searchFallbackMedia = tmdbClient::searchFallbacks,
+                loadMediaCountries = tmdbClient::loadProductionCountries,
             )
         }
     }

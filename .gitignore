@@ -10,6 +10,12 @@ out/
 
 # Machine-specific configuration
 local.properties
+
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
+
 # Local launcher contains a machine-specific JDK path.
 gradle-local.ps1
 .DS_Store

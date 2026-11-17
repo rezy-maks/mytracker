@@ -3,7 +3,9 @@ package mytracker
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +35,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,16 +45,27 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.BaselineShift
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlin.time.TimeSource
+import androidx.compose.ui.platform.LocalUriHandler
+import mytracker.resources.Res
+import mytracker.resources.tmdb_logo
+import org.jetbrains.compose.resources.painterResource
 import mytracker.domain.MediaEntry
+import mytracker.domain.MediaEntryIdGenerator
+import mytracker.domain.MediaSearchResult
+import mytracker.domain.MediaSearchRateLimitException
 import mytracker.domain.ViewingNote
 import mytracker.domain.WatchStatus
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -61,18 +75,46 @@ private val Background = Color(0xFF111318)
 private val Panel = Color(0xFF1A1D24)
 private val Muted = Color(0xFF9AA1AE)
 private val Accent = Color(0xFFB5A0FF)
+private const val InitialSearchDebounceMillis = 300L
+private const val SearchDebounceStepMillis = 500L
+private const val MaximumSearchDebounceMillis = 3000L
+private const val FallbackSearchDelayMillis = 1500L
+private val mediaEntryIdGenerator = MediaEntryIdGenerator()
 
 @Composable
 fun App(
     initialEntries: List<MediaEntry> = emptyList(),
-    onEntriesChanged: (List<MediaEntry>) -> Unit = {},
+    onEntriesChanged: (List<MediaEntry>) -> Result<Unit> = { Result.success(Unit) },
+    initialStorageError: String? = null,
     currentDate: () -> String = { "" },
+    searchMedia: suspend (query: String, category: String) -> List<MediaSearchResult> = { _, _ -> emptyList() },
+    searchFallbackMedia: suspend (query: String, category: String) -> List<MediaSearchResult> = { _, _ -> emptyList() },
+    loadMediaCountries: suspend (MediaSearchResult) -> List<String> = { emptyList() },
 ) {
     var selectedItem by remember { mutableStateOf("Главная") }
     val entries = remember { mutableStateListOf<MediaEntry>().apply { addAll(initialEntries) } }
+    var storageError by remember { mutableStateOf(initialStorageError) }
     var isAddDialogVisible by remember { mutableStateOf(false) }
+    var isAboutDialogVisible by remember { mutableStateOf(false) }
     var selectedEntryId by remember { mutableStateOf<String?>(null) }
     var entryPendingDeletion by remember { mutableStateOf<MediaEntry?>(null) }
+
+    fun commitEntries(updatedEntries: List<MediaEntry>): Boolean {
+        if (initialStorageError != null) {
+            storageError = initialStorageError
+            return false
+        }
+        storageError = null
+        onEntriesChanged(updatedEntries)
+            .onSuccess {
+                entries.clear()
+                entries.addAll(updatedEntries)
+            }
+            .onFailure { error ->
+                storageError = error.message ?: error::class.simpleName ?: "Неизвестная ошибка"
+            }
+        return storageError == null
+    }
 
     MaterialTheme(
         colorScheme = darkColorScheme(
@@ -88,6 +130,7 @@ fun App(
                 Sidebar(
                     selectedItem = selectedItem,
                     onItemSelected = { selectedItem = it },
+                    onAboutClick = { isAboutDialogVisible = true },
                 )
                 Spacer(Modifier.width(24.dp))
                 if (selectedItem == "Главная") {
@@ -104,6 +147,29 @@ fun App(
                 }
             }
             val selectedEntry = entries.firstOrNull { it.id == selectedEntryId }
+            if (isAboutDialogVisible) {
+                val uriHandler = LocalUriHandler.current
+                AlertDialog(
+                    onDismissRequest = { isAboutDialogVisible = false },
+                    title = { Text("О приложении") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Image(
+                                painter = painterResource(Res.drawable.tmdb_logo),
+                                contentDescription = "The Movie Database",
+                                modifier = Modifier.width(160.dp).height(22.dp),
+                            )
+                            Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
+                            TextButton(onClick = { uriHandler.openUri("https://www.themoviedb.org") }) {
+                                Text("The Movie Database", color = Accent)
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { isAboutDialogVisible = false }) { Text("Закрыть") }
+                    },
+                )
+            }
             if (selectedEntry != null) {
                 EntryDetailsDialog(
                     entry = selectedEntry,
@@ -112,8 +178,7 @@ fun App(
                     onEntryChange = { updatedEntry ->
                         val index = entries.indexOfFirst { it.id == updatedEntry.id }
                         if (index >= 0) {
-                            entries[index] = updatedEntry
-                            onEntriesChanged(entries.toList())
+                            commitEntries(entries.toList().toMutableList().also { it[index] = updatedEntry })
                         }
                     },
                 )
@@ -126,8 +191,7 @@ fun App(
                     confirmButton = {
                         TextButton(
                             onClick = {
-                                entries.removeAll { it.id == entry.id }
-                                onEntriesChanged(entries.toList())
+                                commitEntries(entries.filterNot { it.id == entry.id })
                                 entryPendingDeletion = null
                             },
                         ) {
@@ -142,24 +206,37 @@ fun App(
             if (isAddDialogVisible) {
                 AddEntryDialog(
                     onDismiss = { isAddDialogVisible = false },
+                    searchMedia = searchMedia,
+                    searchFallbackMedia = searchFallbackMedia,
+                    loadMediaCountries = loadMediaCountries,
                     initialCategory = when (selectedItem) {
                         "Аниме" -> "Аниме"
                         "Сериалы" -> "Сериал"
                         else -> "Фильм"
                     },
-                    onAdd = { title, category, status, noteText, rating ->
-                        entries += MediaEntry(
-                            id = "${entries.size}-${title.hashCode()}",
+                    onAdd = { title, category, status, noteText, rating, result ->
+                        val updatedEntries = entries.toList() + MediaEntry(
+                            id = mediaEntryIdGenerator.generate(entries.mapTo(mutableSetOf()) { it.id }),
                             title = title,
                             categoryId = category,
+                            externalReference = result?.reference,
                             status = status,
                             rating = rating,
                             viewingNotes = noteText.trim().takeIf { it.isNotEmpty() }?.let { text ->
                                 listOf(ViewingNote(date = currentDate(), text = text))
                             }.orEmpty(),
                         )
-                        onEntriesChanged(entries.toList())
-                        isAddDialogVisible = false
+                        if (commitEntries(updatedEntries)) isAddDialogVisible = false
+                    },
+                )
+            }
+            storageError?.let { error ->
+                AlertDialog(
+                    onDismissRequest = { storageError = initialStorageError },
+                    title = { Text("Ошибка работы с каталогом") },
+                    text = { Text(error) },
+                    confirmButton = {
+                        TextButton(onClick = { storageError = initialStorageError }) { Text("Понятно") }
                     },
                 )
             }
@@ -168,7 +245,11 @@ fun App(
 }
 
 @Composable
-private fun Sidebar(selectedItem: String, onItemSelected: (String) -> Unit) {
+private fun Sidebar(
+    selectedItem: String,
+    onItemSelected: (String) -> Unit,
+    onAboutClick: () -> Unit,
+) {
     Column(
         modifier = Modifier.width(230.dp).fillMaxSize()
             .background(Panel, RoundedCornerShape(20.dp)).padding(22.dp),
@@ -192,6 +273,7 @@ private fun Sidebar(selectedItem: String, onItemSelected: (String) -> Unit) {
                 onItemSelected("Все произведения")
             }
         }
+        TextButton(onClick = onAboutClick) { Text("О приложении", color = Muted) }
     }
 }
 
@@ -791,24 +873,210 @@ private fun RatingPicker(value: Int?, onValueChange: (Int) -> Unit) {
 private fun AddEntryDialog(
     onDismiss: () -> Unit,
     initialCategory: String,
-    onAdd: (String, String, WatchStatus, String, Int?) -> Unit,
+    searchMedia: suspend (String, String) -> List<MediaSearchResult>,
+    searchFallbackMedia: suspend (String, String) -> List<MediaSearchResult>,
+    loadMediaCountries: suspend (MediaSearchResult) -> List<String>,
+    onAdd: (String, String, WatchStatus, String, Int?, MediaSearchResult?) -> Unit,
 ) {
     var title by remember { mutableStateOf("") }
     var category by remember { mutableStateOf(initialCategory) }
     var status by remember { mutableStateOf(WatchStatus.WANT_TO_WATCH) }
     var note by remember { mutableStateOf("") }
     var rating by remember { mutableStateOf<Int?>(null) }
+    var selectedResult by remember { mutableStateOf<MediaSearchResult?>(null) }
+    var selectedCountries by remember { mutableStateOf<List<String>>(emptyList()) }
+    var isLoadingCountries by remember { mutableStateOf(false) }
+    var countryLoadFailed by remember { mutableStateOf(false) }
+    var searchResults by remember { mutableStateOf<List<MediaSearchResult>>(emptyList()) }
+    var searchError by remember { mutableStateOf<String?>(null) }
+    var hasSearched by remember { mutableStateOf(false) }
+    var isSearching by remember { mutableStateOf(false) }
+    var isSearchExpanded by remember { mutableStateOf(true) }
+    var searchDebounceMillis by remember { mutableStateOf(InitialSearchDebounceMillis) }
+
+    LaunchedEffect(title, category, isSearchExpanded, selectedResult) {
+        val query = title.trim()
+        if (selectedResult?.title == query) return@LaunchedEffect
+
+        searchResults = emptyList()
+        searchError = null
+        hasSearched = false
+        isSearching = false
+        if (!isSearchExpanded || query.isBlank()) return@LaunchedEffect
+
+        try {
+            val searchStartedAt = TimeSource.Monotonic.markNow()
+            delay(searchDebounceMillis)
+            isSearching = true
+            searchResults = searchMedia(query, category)
+            if (searchResults.isEmpty()) {
+                val remainingFallbackDelay =
+                    (FallbackSearchDelayMillis - searchStartedAt.elapsedNow().inWholeMilliseconds).coerceAtLeast(0)
+                if (remainingFallbackDelay > 0) delay(remainingFallbackDelay)
+                searchResults = searchFallbackMedia(query, category)
+            }
+            hasSearched = true
+            if (searchDebounceMillis > InitialSearchDebounceMillis) {
+                searchDebounceMillis = (searchDebounceMillis - SearchDebounceStepMillis)
+                    .coerceAtLeast(InitialSearchDebounceMillis)
+            }
+        } catch (exception: kotlinx.coroutines.CancellationException) {
+            throw exception
+        } catch (exception: MediaSearchRateLimitException) {
+            searchDebounceMillis = (searchDebounceMillis + SearchDebounceStepMillis)
+                .coerceAtMost(MaximumSearchDebounceMillis)
+            searchError = buildString {
+                append(exception.message ?: "TMDB \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0438\u043b \u0447\u0438\u0441\u043b\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432.")
+                append(" \u041f\u0430\u0443\u0437\u0430 \u0434\u0438\u043d\u0430\u043c\u0438\u0447\u0435\u0441\u043a\u043e\u0433\u043e \u043f\u043e\u0438\u0441\u043a\u0430 \u0443\u0432\u0435\u043b\u0438\u0447\u0435\u043d\u0430 \u0434\u043e ")
+                append(searchDebounceMillis)
+                append(" \u043c\u0441.")
+            }
+            hasSearched = true
+        } catch (exception: Exception) {
+            searchError = exception.message ?: "TMDB search failed."
+            hasSearched = true
+        } finally {
+            isSearching = false
+        }
+    }
+
+    LaunchedEffect(selectedResult) {
+        val result = selectedResult ?: run {
+            selectedCountries = emptyList()
+            isLoadingCountries = false
+            countryLoadFailed = false
+            return@LaunchedEffect
+        }
+        selectedCountries = emptyList()
+        isLoadingCountries = true
+        countryLoadFailed = false
+        try {
+            selectedCountries = loadMediaCountries(result)
+        } catch (exception: kotlinx.coroutines.CancellationException) {
+            throw exception
+        } catch (_: Exception) {
+            selectedCountries = emptyList()
+            countryLoadFailed = true
+        } finally {
+            isLoadingCountries = false
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Новое произведение") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                modifier = Modifier.heightIn(max = 590.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (isSearchExpanded || selectedResult == null) {
                 OutlinedTextField(
                     value = title,
-                    onValueChange = { title = it },
+                    onValueChange = {
+                        title = it
+                        if (it != selectedResult?.title) selectedResult = null
+                    },
                     label = { Text("Название") },
                     singleLine = true,
+                )
+                }
+                if (isSearching) Text("\u0418\u0449\u0435\u043c...", color = Muted, fontSize = 12.sp)
+                val selected = selectedResult
+                if (!isSearchExpanded && selected != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                selected.title,
+                                color = Muted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                listOfNotNull(
+                                    selected.releaseYear?.toString(),
+                                    when {
+                                        isLoadingCountries -> "Загрузка страны…"
+                                        selectedCountries.isNotEmpty() -> selectedCountries.joinToString(", ")
+                                        countryLoadFailed -> "Страну не удалось загрузить"
+                                        else -> "Страна не указана"
+                                    },
+                                ).joinToString(" · "),
+                                color = Muted,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        TextButton(onClick = { isSearchExpanded = true }) { Text("Изменить") }
+                    }
+                }
+                searchError?.let { Text(it, color = Color(0xFFE58A96), fontSize = 12.sp) }
+                if (isSearchExpanded && searchResults.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 190.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        searchResults.forEach { result ->
+                            val isSelected = result == selectedResult
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().pointerInput(result) {
+                                    detectTapGestures(
+                                        onTap = {
+                                            selectedResult = result
+                                            title = result.title
+                                        },
+                                        onDoubleTap = {
+                                            selectedResult = result
+                                            title = result.title
+                                            isSearchExpanded = false
+                                        },
+                                    )
+                                },
+                                color = if (isSelected) Color(0xFF302B43) else Panel,
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    Text(
+                                        result.title,
+                                        color = if (isSelected) Accent else Color(0xFFF1F0F6),
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                    Text(
+                                        listOfNotNull(
+                                            result.releaseYear?.toString(),
+                                            if (result.reference.mediaType == "movie") "Фильм" else "Сериал",
+                                        ).joinToString(" · "),
+                                        color = Muted,
+                                        fontSize = 12.sp,
+                                    )
+                                    result.overview?.let { overview ->
+                                        Text(
+                                            overview,
+                                            color = Muted,
+                                            fontSize = 11.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (isSearchExpanded && hasSearched && searchError == null) {
+                    Text("Ничего не найдено. Можно добавить запись вручную.", color = Muted, fontSize = 12.sp)
+                }
+                Text(
+                    "Выбери результат, чтобы сохранить ссылку на карточку TMDB. Без выбранного результата запись добавится вручную.",
+                    color = Muted,
+                    fontSize = 11.sp,
                 )
                 OutlinedTextField(
                     value = note,
@@ -820,7 +1088,17 @@ private fun AddEntryDialog(
                 Text("Категория", color = Muted)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("Фильм", "Сериал", "Аниме").forEach { option ->
-                        TextButton(onClick = { category = option }) {
+                        TextButton(
+                            onClick = {
+                                if (category != option) {
+                                    category = option
+                                    searchResults = emptyList()
+                                    selectedResult = null
+                                    hasSearched = false
+                                    searchError = null
+                                }
+                            },
+                        ) {
                             Text(option, color = if (category == option) Accent else Muted)
                         }
                     }
@@ -841,7 +1119,7 @@ private fun AddEntryDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { onAdd(title.trim(), category, status, note, rating) },
+                onClick = { onAdd(title.trim(), category, status, note, rating, selectedResult) },
                 enabled = title.isNotBlank() && (status != WatchStatus.WATCHED || rating != null),
             ) {
                 Text("Добавить")

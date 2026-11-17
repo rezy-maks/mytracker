@@ -28,6 +28,7 @@ data class MediaEntry(
     val id: String,
     val title: String,
     val categoryId: String,
+    val externalReference: ExternalMediaReference? = null,
     val status: WatchStatus = WatchStatus.WANT_TO_WATCH,
     /** A score from 1 to 5 check marks. Null means no score was assigned. */
     val rating: Int? = null,
